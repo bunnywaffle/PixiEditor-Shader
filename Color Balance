@@ -1,0 +1,171 @@
+// Professional Color Balance Shader with ADAPTIVE tone separation
+// Automatically analyzes image brightness to define shadows/midtones/highlights
+// Interface: Cyan←→Red, Magenta←→Green, Yellow←→Blue sliders
+
+uniform shader iImage;
+
+// SHADOWS: Adjust color balance in dark areas
+uniform float shadows_CyanToRed;      // -1.0=Cyan, 0.0=Neutral, +1.0=Red
+uniform float shadows_MagentaToGreen; // -1.0=Magenta, 0.0=Neutral, +1.0=Green
+uniform float shadows_YellowToBlue;   // -1.0=Yellow, 0.0=Neutral, +1.0=Blue
+
+// MIDTONES: Adjust color balance in medium brightness areas
+uniform float midtones_CyanToRed;
+uniform float midtones_MagentaToGreen;
+uniform float midtones_YellowToBlue;
+
+// HIGHLIGHTS: Adjust color balance in bright areas
+uniform float highlights_CyanToRed;
+uniform float highlights_MagentaToGreen;
+uniform float highlights_YellowToBlue;
+
+// SETTINGS
+uniform vec2 iResolution;        // Image resolution for sampling
+uniform float shadowPercentile;  // Default: 0.33 (bottom 33% = shadows)
+uniform float highlightPercentile; // Default: 0.67 (top 33% = highlights)
+uniform float preserveLuminosity; // 0.0=Off, 1.0=On (maintains brightness)
+
+// Get adaptive thresholds based on image content (simplified approach)
+vec2 getAdaptiveThresholds(vec2 coords) {
+    // Sample 16 points across the image in a 4x4 grid
+    float minLuma = 1.0;
+    float maxLuma = 0.0;
+    float totalLuma = 0.0;
+    float sampleCount = 0.0;
+    
+    // Fixed loop with constant bounds
+    for (int x = 0; x < 4; x++) {
+        for (int y = 0; y < 4; y++) {
+            vec2 sampleCoords = (vec2(float(x), float(y)) / 3.0) * iResolution;
+            half4 sampleColor = iImage.eval(sampleCoords);
+            
+            if (sampleColor.a > 0.0) {
+                float luma = dot(sampleColor.rgb, half3(0.299, 0.587, 0.114));
+                minLuma = min(minLuma, luma);
+                maxLuma = max(maxLuma, luma);
+                totalLuma += luma;
+                sampleCount += 1.0;
+            }
+        }
+    }
+    
+    if (sampleCount == 0.0) {
+        return vec2(0.33, 0.67); // Fallback to fixed values
+    }
+    
+    float avgLuma = totalLuma / sampleCount;
+    float lumaRange = maxLuma - minLuma;
+    
+    // Calculate adaptive thresholds based on the actual brightness range
+    float shadowThreshold = minLuma + (lumaRange * shadowPercentile);
+    float highlightThreshold = minLuma + (lumaRange * highlightPercentile);
+    
+    // Ensure reasonable separation (at least 10% of the range)
+    float minSeparation = max(0.05, lumaRange * 0.1);
+    if (highlightThreshold - shadowThreshold < minSeparation) {
+        float center = avgLuma;
+        shadowThreshold = max(minLuma, center - minSeparation * 0.5);
+        highlightThreshold = min(maxLuma, center + minSeparation * 0.5);
+    }
+    
+    return vec2(shadowThreshold, highlightThreshold);
+}
+
+// Apply professional color balance (like Photoshop/Lightroom)
+half3 applyColorBalance(half3 inputColor, half3 colorAdjustment, float areaMask) {
+    // Skip processing if no mask coverage
+    if (areaMask <= 0.0) return inputColor;
+    
+    half3 adjustedColor = inputColor;
+    
+    // CYAN ←→ RED adjustment
+    float cyanRedAdjust = colorAdjustment.r;
+    if (cyanRedAdjust > 0.0) {
+        // Push toward RED
+        adjustedColor.r = mix(adjustedColor.r, min(adjustedColor.r * (1.0 + cyanRedAdjust * 0.5), 1.0), areaMask);
+    } else if (cyanRedAdjust < 0.0) {
+        // Push toward CYAN (less red, more green+blue)
+        float cyanStrength = -cyanRedAdjust;
+        adjustedColor.r = mix(adjustedColor.r, adjustedColor.r * (1.0 - cyanStrength * 0.6), areaMask);
+        adjustedColor.gb = mix(adjustedColor.gb, min(adjustedColor.gb * (1.0 + cyanStrength * 0.25), 1.0), areaMask);
+    }
+    
+    // MAGENTA ←→ GREEN adjustment
+    float magentaGreenAdjust = colorAdjustment.g;
+    if (magentaGreenAdjust > 0.0) {
+        // Push toward GREEN
+        adjustedColor.g = mix(adjustedColor.g, min(adjustedColor.g * (1.0 + magentaGreenAdjust * 0.5), 1.0), areaMask);
+    } else if (magentaGreenAdjust < 0.0) {
+        // Push toward MAGENTA (less green, more red+blue)
+        float magentaStrength = -magentaGreenAdjust;
+        adjustedColor.g = mix(adjustedColor.g, adjustedColor.g * (1.0 - magentaStrength * 0.6), areaMask);
+        adjustedColor.rb = mix(adjustedColor.rb, min(adjustedColor.rb * (1.0 + magentaStrength * 0.25), 1.0), areaMask);
+    }
+    
+    // YELLOW ←→ BLUE adjustment
+    float yellowBlueAdjust = colorAdjustment.b;
+    if (yellowBlueAdjust > 0.0) {
+        // Push toward BLUE
+        adjustedColor.b = mix(adjustedColor.b, min(adjustedColor.b * (1.0 + yellowBlueAdjust * 0.5), 1.0), areaMask);
+    } else if (yellowBlueAdjust < 0.0) {
+        // Push toward YELLOW (less blue, more red+green)
+        float yellowStrength = -yellowBlueAdjust;
+        adjustedColor.b = mix(adjustedColor.b, adjustedColor.b * (1.0 - yellowStrength * 0.6), areaMask);
+        adjustedColor.rg = mix(adjustedColor.rg, min(adjustedColor.rg * (1.0 + yellowStrength * 0.25), 1.0), areaMask);
+    }
+    
+    return adjustedColor;
+}
+
+half4 main(vec2 coords) {
+    // Sample the input image
+    half4 originalColor = iImage.eval(coords);
+    
+    // Skip transparent pixels
+    if (originalColor.a <= 0.0) {
+        return originalColor;
+    }
+    
+    half3 workingColor = originalColor.rgb;
+    
+    // Calculate this pixel's brightness
+    float pixelBrightness = dot(workingColor, half3(0.299, 0.587, 0.114));
+    
+    // Get adaptive thresholds based on the entire image's luminosity distribution
+    vec2 thresholds = getAdaptiveThresholds(coords);
+    float adaptiveShadowThreshold = thresholds.x;
+    float adaptiveHighlightThreshold = thresholds.y;
+    
+    // Create masks for different brightness areas (relative to this image)
+    float shadowMask = 1.0 - smoothstep(adaptiveShadowThreshold * 0.5, adaptiveShadowThreshold, pixelBrightness);
+    float highlightMask = smoothstep(adaptiveHighlightThreshold, adaptiveHighlightThreshold + (1.0 - adaptiveHighlightThreshold) * 0.5, pixelBrightness);
+    float midtoneMask = max(0.0, 1.0 - shadowMask - highlightMask);
+    
+    // Store original brightness for luminosity preservation
+    float originalBrightness = pixelBrightness;
+    
+    // Apply SHADOW color adjustments (only affects the darkest areas of THIS image)
+    half3 shadowColorShift = half3(shadows_CyanToRed, shadows_MagentaToGreen, shadows_YellowToBlue);
+    workingColor = applyColorBalance(workingColor, shadowColorShift, shadowMask);
+    
+    // Apply MIDTONE color adjustments (affects the middle brightness areas of THIS image)
+    half3 midtoneColorShift = half3(midtones_CyanToRed, midtones_MagentaToGreen, midtones_YellowToBlue);
+    workingColor = applyColorBalance(workingColor, midtoneColorShift, midtoneMask);
+    
+    // Apply HIGHLIGHT color adjustments (only affects the brightest areas of THIS image)
+    half3 highlightColorShift = half3(highlights_CyanToRed, highlights_MagentaToGreen, highlights_YellowToBlue);
+    workingColor = applyColorBalance(workingColor, highlightColorShift, highlightMask);
+    
+    // PRESERVE LUMINOSITY: Keep original brightness if enabled
+    if (preserveLuminosity > 0.5) {
+        float newBrightness = dot(workingColor, half3(0.299, 0.587, 0.114));
+        if (newBrightness > 0.0) {
+            workingColor = mix(workingColor, workingColor * (originalBrightness / newBrightness), preserveLuminosity);
+        }
+    }
+    
+    // Ensure colors stay in valid range
+    workingColor = clamp(workingColor, 0.0, 1.0);
+    
+    return half4(workingColor, originalColor.a);
+}
