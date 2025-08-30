@@ -1,0 +1,46 @@
+// Input image texture
+uniform shader iImage;
+
+// Vibrance amount.
+// -1.0: Grayscale (fully desaturated)
+//  0.0: No change
+// > 0.0: Increase saturation, with a stronger effect on G and B channels than R.
+uniform float vibrance;
+
+// Standard luminance weights for converting RGB to grayscale
+const half3 LUMINANCE_WEIGHT = half3(0.299, 0.587, 0.114);
+
+half4 main(vec2 coords) {
+    // 1. Sample the original color from the input image
+    half4 originalColor = iImage.eval(coords);
+
+    // 2. Calculate the grayscale value (luminance) of the color
+    half luminance = dot(originalColor.rgb, LUMINANCE_WEIGHT);
+    half3 grayscaleColor = half3(luminance);
+
+    half3 finalColor;
+
+    // 3. Apply vibrance logic
+    if (vibrance > 0.0) {
+        // Clamp the vibrance to a maximum of 0.5 (50% increase)
+        float clampedVibrance = min(vibrance, 0.5);
+
+        // When INCREASING vibrance, boost Green and Blue channels more than Red.
+        // The max boost for G/B is 50% (mix amount 1.5)
+        // The max boost for R is 20% (mix amount 1.2)
+        float mixAmountGB = clampedVibrance + 1.0;
+        float mixAmountR = (clampedVibrance * 0.4) + 1.0;
+
+        finalColor.r = mix(grayscaleColor.r, originalColor.r, mixAmountR);
+        finalColor.g = mix(grayscaleColor.g, originalColor.g, mixAmountGB);
+        finalColor.b = mix(grayscaleColor.b, originalColor.b, mixAmountGB);
+    } else {
+        // When DECREASING vibrance, desaturate all channels equally.
+        float mixAmount = vibrance + 1.0;
+        finalColor = mix(grayscaleColor.rgb, originalColor.rgb, mixAmount);
+    }
+
+    // 4. Return the new color, preserving the original alpha channel
+    return half4(finalColor, originalColor.a);
+}
+
